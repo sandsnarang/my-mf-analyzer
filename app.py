@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pyxirr import xirr
+import plotly.express as px
 
 st.set_page_config(page_title="MF Multi-Year Analyzer", layout="wide")
 st.title("📈 Multi-Year Portfolio Performance")
@@ -9,53 +10,59 @@ st.title("📈 Multi-Year Portfolio Performance")
 uploaded_file = st.sidebar.file_uploader("Upload your Transaction CSV", type="csv")
 
 if uploaded_file:
-    # Load the data
     df = pd.read_csv(uploaded_file)
-    
-    # --- RUGGED COLUMN CLEANING ---
-    # 1. Strip spaces from all column names to prevent "Key Errors"
     df.columns = df.columns.str.strip()
     
-    # 2. Map your specific column names to the ones the code needs
-    # We look for your specific header "Name of the Fund" here
+    # 1. Column Mapping
     mapping = {
         'Name of the Fund': 'Scheme Name', 
-        'Name of the': 'Scheme Name', # Backup for the cut-off version
+        'Name of the': 'Scheme Name',
         'Amount (INR)': 'Amount',
-        'Current Nav': 'Current_NAV'
+        'Current Nav': 'Current_NAV',
+        'Order': 'Type' # 'buy' or 'sell'
     }
     df = df.rename(columns=mapping)
 
-    # 3. Ensure 'Scheme Name' exists before proceeding
-    if 'Scheme Name' not in df.columns:
-        st.error(f"Required column 'Name of the Fund' not found. Available columns: {list(df.columns)}")
-        st.stop()
-
-    # 4. Clean Data Types
+    # 2. Data Cleaning
     df['Date'] = pd.to_datetime(df['Date'], dayfirst=True)
-    df['Units'] = pd.to_numeric(df['Units'], errors='coerce')
-    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+    df['Units'] = pd.to_numeric(df['Units'], errors='coerce').fillna(0)
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     df['Current_NAV'] = pd.to_numeric(df['Current_NAV'], errors='coerce')
 
-    # --- PERFORMANCE CALCULATIONS ---
-    # Group by Fund to handle multiple transactions over years
-    summary = df.groupby('Scheme Name').agg({
-        'Units': 'sum',
-        'Amount': 'sum'
-    }).reset_index()
-    
-    # Map the latest NAV to calculate Current Value
-    latest_navs = df.groupby('Scheme Name')['Current_NAV'].last().to_dict()
-    summary['Current Value'] = summary['Scheme Name'].map(latest_navs) * summary['Units']
-    
-    # Calculate XIRR (Value Research's standard for multi-year returns)
+    # 3. Aggregation (Adjusting for Sells)
+    # Net Units = sum of buy units - sum of sell units
+    def calculate_summary(group):
+        net_units = group.loc[group['Type'].str.lower() == 'buy', 'Units'].sum() - \
+                    group.loc[group['Type'].str.lower() == 'sell', 'Units'].sum()
+        total_invested = group.loc[group['Type'].str.lower() == 'buy', 'Amount'].sum()
+        latest_nav = group['Current_NAV'].iloc[-1]
+        return pd.Series({
+            'Net Units': net_units,
+            'Invested Amount': total_invested,
+            'Current Value': net_units * latest_nav
+        })
+
+    summary = df.groupby('Scheme Name').apply(calculate_summary).reset_index()
+
+    # 4. XIRR Calculation (Adjusted for Buy/Sell)
     xirr_results = []
     for scheme in summary['Scheme Name']:
         scheme_tx = df[df['Scheme Name'] == scheme].copy()
         
-        # We need dates and amounts (investments are negative, current value is positive)
-        dates = scheme_tx['Date'].tolist() + [pd.Timestamp.now()]
-        amounts = (-scheme_tx['Amount']).tolist() + [summary.loc[summary['Scheme Name'] == scheme, 'Current Value'].iloc[0]]
+        # Prepare Cash Flows: 
+        # Buys are negative, Sells are positive
+        scheme_tx['Flow'] = np.where(scheme_tx['Type'].str.lower() == 'buy', 
+                                     -scheme_tx['Amount'], 
+                                     scheme_tx['Amount'])
+        
+        dates = scheme_tx['Date'].tolist()
+        amounts = scheme_tx['Flow'].tolist()
+        
+        # Add Current Valuation as a final positive flow if units remain
+        current_val = summary.loc[summary['Scheme Name'] == scheme, 'Current Value'].iloc[0]
+        if current_val > 0:
+            dates.append(pd.Timestamp.now())
+            amounts.append(current_val)
         
         try:
             rate = xirr(dates, amounts) * 100
@@ -65,15 +72,29 @@ if uploaded_file:
 
     summary['XIRR (%)'] = xirr_results
 
-    # --- RESULTS DASHBOARD ---
-    st.subheader("Your Consolidated Portfolio Performance")
-    
-    # Highlight the best-performing fund based on XIRR
-    st.dataframe(summary.style.highlight_max(axis=0, subset=['XIRR (%)']))
+    # 5. Color Coding Logic
+    def get_color(val):
+        if val < 10: return 'Amber (<10%)'
+        elif 10 <= val <= 15: return 'Green (10-15%)'
+        else: return 'Blue (>15%)'
 
-    # Visual Comparison
-    st.write("### Annualized Returns (XIRR) by Fund")
-    st.bar_chart(data=summary, x='Scheme Name', y='XIRR (%)')
+    summary['Performance Category'] = summary['XIRR (%)'].apply(get_color)
+    color_map = {'Amber (<10%)': '#FFBF00', 'Green (10-15%)': '#228B22', 'Blue (>15%)': '#0000FF'}
+
+    # 6. Display Dashboard
+    st.subheader("Your Portfolio Comparison")
+    
+    # Custom Bar Chart with Plotly for Color Control
+    fig = px.bar(summary, 
+                 x='Scheme Name', 
+                 y='XIRR (%)', 
+                 color='Performance Category',
+                 color_discrete_map=color_map,
+                 title="Annualized Returns by Fund",
+                 text_auto='.2f')
+    
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(summary[['Scheme Name', 'Net Units', 'Invested Amount', 'Current Value', 'XIRR (%)']])
 
 else:
-    st.info("Please upload your Transaction CSV to begin.")
+    st.info("Upload your CSV. Ensure it has an 'Order' column with 'buy' or 'sell'.")
