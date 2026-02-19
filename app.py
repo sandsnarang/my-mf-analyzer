@@ -1,54 +1,62 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from pyxirr import xirr
 
-# Title and UI
-st.set_page_config(page_title="MF Performance Pro", layout="wide")
-st.title("📊 Value Research Style MF Analyzer")
+st.set_page_config(page_title="MF Multi-Year Analyzer", layout="wide")
+st.title("📈 Multi-Year Portfolio Performance")
 
-# 1. Data Input
-st.sidebar.header("1. Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload your Transaction CSV", type="csv")
 
 if uploaded_file:
-    # Load the data
     df = pd.read_csv(uploaded_file)
     
-    # --- NEW: Cleanup Column Names ---
-    # This removes extra spaces and makes everything consistent
-    df.columns = df.columns.str.strip() 
-    
-    # Check if 'Scheme Name' exists, if not, try to find the closest match
-    if 'Scheme Name' not in df.columns:
-        st.error(f"Could not find 'Scheme Name'. Your columns are: {list(df.columns)}")
-        st.stop()
+    # 1. Clean Column Names based on your image
+    df.columns = df.columns.str.strip()
+    # Handle the cut-off column name from the screenshot
+    df = df.rename(columns={'Name of the': 'Scheme Name', 'Amount (INR': 'Amount'})
 
-    # 2. Calculation Logic
-    st.write("### Your Portfolio Overview")
+    # 2. Convert Date to a format the computer understands
+    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True)
+
+    # 3. Group by Fund to see Total Holding
+    summary = df.groupby('Scheme Name').agg({
+        'Units': 'sum',
+        'Amount': 'sum'
+    }).reset_index()
     
-    # Adding mock metrics for the "VR Grid"
-    df['Return (%)'] = np.random.uniform(12, 22, len(df))
-    df['Risk (Std Dev)'] = np.random.uniform(10, 18, len(df))
-    df['Sharpe Ratio'] = (df['Return (%)'] - 6.5) / df['Risk (Std Dev)']
+    # Get current NAV from your last entry for calculation
+    latest_navs = df.groupby('Scheme Name')['Current Nav'].last().to_dict()
+    summary['Current Value'] = summary['Scheme Name'].map(latest_navs) * summary['Units']
+    summary['Absolute Return %'] = ((summary['Current Value'] - summary['Amount']) / summary['Amount']) * 100
+
+    # 4. Calculate XIRR for each fund
+    # This accounts for the 2020 vs 2026 timing
+    xirr_results = []
+    for scheme in summary['Scheme Name']:
+        scheme_tx = df[df['Scheme Name'] == scheme].copy()
+        
+        # XIRR needs: [Investments as negative numbers] + [Current Value as positive number]
+        dates = scheme_tx['Date'].tolist() + [pd.Timestamp.now()]
+        amounts = (-scheme_tx['Amount']).tolist() + [summary.loc[summary['Scheme Name'] == scheme, 'Current Value'].iloc[0]]
+        
+        try:
+            rate = xirr(dates, amounts) * 100
+        except:
+            rate = 0
+        xirr_results.append(round(rate, 2))
+
+    summary['XIRR (%)'] = xirr_results
+
+    # 5. Display Results
+    st.subheader("Fund Performance Summary")
+    st.dataframe(summary.style.highlight_max(subset=['XIRR (%)'], color='#90EE90'))
+
+    # 6. The Value Research Comparison
+    st.subheader("XIRR Comparison (Annualized Growth)")
+    st.bar_chart(data=summary, x='Scheme Name', y='XIRR (%)')
     
-    st.dataframe(df)
-    
-    # 3. Visualization
-    st.write("### Risk vs. Return (The VR Grid)")
-    
-    # We use st.scatter_chart and tell it exactly which columns to use
-    st.scatter_chart(
-        data=df, 
-        x='Risk (Std Dev)', 
-        y='Return (%)', 
-        color='Scheme Name'
-    )
-    
-    # 4. Portfolio Weighting
-    st.write("### Portfolio Concentration")
-    total_val = df['Current Value'].sum()
-    df['Weight (%)'] = (df['Current Value'] / total_val) * 100
-    st.bar_chart(data=df, x='Scheme Name', y='Weight (%)')
+    st.info("💡 **Why XIRR?** Your 2020 SBI Large Cap units have had 6 years to grow, while 2026 units have had days. XIRR levels the playing field to show your true annual performance.")
 
 else:
-    st.info("Waiting for CSV upload... Use the sidebar to upload 'test_data.csv'.")
+    st.info("Awaiting upload. Ensure your CSV has: Date, Name of the, Units, Amount (INR).")
