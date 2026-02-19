@@ -9,54 +9,71 @@ st.title("📈 Multi-Year Portfolio Performance")
 uploaded_file = st.sidebar.file_uploader("Upload your Transaction CSV", type="csv")
 
 if uploaded_file:
+    # Load the data
     df = pd.read_csv(uploaded_file)
     
-    # 1. Clean Column Names based on your image
+    # --- RUGGED COLUMN CLEANING ---
+    # 1. Strip spaces from all column names to prevent "Key Errors"
     df.columns = df.columns.str.strip()
-    # Handle the cut-off column name from the screenshot
-    df = df.rename(columns={'Name of the': 'Scheme Name', 'Amount (INR': 'Amount'})
+    
+    # 2. Map your specific column names to the ones the code needs
+    # We look for your specific header "Name of the Fund" here
+    mapping = {
+        'Name of the Fund': 'Scheme Name', 
+        'Name of the': 'Scheme Name', # Backup for the cut-off version
+        'Amount (INR)': 'Amount',
+        'Current Nav': 'Current_NAV'
+    }
+    df = df.rename(columns=mapping)
 
-    # 2. Convert Date to a format the computer understands
+    # 3. Ensure 'Scheme Name' exists before proceeding
+    if 'Scheme Name' not in df.columns:
+        st.error(f"Required column 'Name of the Fund' not found. Available columns: {list(df.columns)}")
+        st.stop()
+
+    # 4. Clean Data Types
     df['Date'] = pd.to_datetime(df['Date'], dayfirst=True)
+    df['Units'] = pd.to_numeric(df['Units'], errors='coerce')
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+    df['Current_NAV'] = pd.to_numeric(df['Current_NAV'], errors='coerce')
 
-    # 3. Group by Fund to see Total Holding
+    # --- PERFORMANCE CALCULATIONS ---
+    # Group by Fund to handle multiple transactions over years
     summary = df.groupby('Scheme Name').agg({
         'Units': 'sum',
         'Amount': 'sum'
     }).reset_index()
     
-    # Get current NAV from your last entry for calculation
-    latest_navs = df.groupby('Scheme Name')['Current Nav'].last().to_dict()
+    # Map the latest NAV to calculate Current Value
+    latest_navs = df.groupby('Scheme Name')['Current_NAV'].last().to_dict()
     summary['Current Value'] = summary['Scheme Name'].map(latest_navs) * summary['Units']
-    summary['Absolute Return %'] = ((summary['Current Value'] - summary['Amount']) / summary['Amount']) * 100
-
-    # 4. Calculate XIRR for each fund
-    # This accounts for the 2020 vs 2026 timing
+    
+    # Calculate XIRR (Value Research's standard for multi-year returns)
     xirr_results = []
     for scheme in summary['Scheme Name']:
         scheme_tx = df[df['Scheme Name'] == scheme].copy()
         
-        # XIRR needs: [Investments as negative numbers] + [Current Value as positive number]
+        # We need dates and amounts (investments are negative, current value is positive)
         dates = scheme_tx['Date'].tolist() + [pd.Timestamp.now()]
         amounts = (-scheme_tx['Amount']).tolist() + [summary.loc[summary['Scheme Name'] == scheme, 'Current Value'].iloc[0]]
         
         try:
             rate = xirr(dates, amounts) * 100
+            xirr_results.append(round(rate, 2))
         except:
-            rate = 0
-        xirr_results.append(round(rate, 2))
+            xirr_results.append(0.0)
 
     summary['XIRR (%)'] = xirr_results
 
-    # 5. Display Results
-    st.subheader("Fund Performance Summary")
-    st.dataframe(summary.style.highlight_max(subset=['XIRR (%)'], color='#90EE90'))
-
-    # 6. The Value Research Comparison
-    st.subheader("XIRR Comparison (Annualized Growth)")
-    st.bar_chart(data=summary, x='Scheme Name', y='XIRR (%)')
+    # --- RESULTS DASHBOARD ---
+    st.subheader("Your Consolidated Portfolio Performance")
     
-    st.info("💡 **Why XIRR?** Your 2020 SBI Large Cap units have had 6 years to grow, while 2026 units have had days. XIRR levels the playing field to show your true annual performance.")
+    # Highlight the best-performing fund based on XIRR
+    st.dataframe(summary.style.highlight_max(axis=0, subset=['XIRR (%)']))
+
+    # Visual Comparison
+    st.write("### Annualized Returns (XIRR) by Fund")
+    st.bar_chart(data=summary, x='Scheme Name', y='XIRR (%)')
 
 else:
-    st.info("Awaiting upload. Ensure your CSV has: Date, Name of the, Units, Amount (INR).")
+    st.info("Please upload your Transaction CSV to begin.")
