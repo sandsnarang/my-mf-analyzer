@@ -13,6 +13,7 @@ if uploaded_file:
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()
     
+    # 1. Mapping based on your specific report headers
     mapping = {
         'Name of the Fund': 'Scheme Name', 
         'Name of the': 'Scheme Name',
@@ -22,24 +23,33 @@ if uploaded_file:
     }
     df = df.rename(columns=mapping)
 
-    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True)
+    # 2. RUGGED CLEANING: Prevent AttributeError
+    df['Type'] = df['Type'].astype(str).str.lower().str.strip() # Forces text mode
+    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     df['Units'] = pd.to_numeric(df['Units'], errors='coerce').fillna(0)
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    df['Current_NAV'] = pd.to_numeric(df['Current_NAV'], errors='coerce')
+    df['Current_NAV'] = pd.to_numeric(df['Current_NAV'], errors='coerce').fillna(0)
+    
+    # Remove any rows where Scheme Name is missing
+    df = df.dropna(subset=['Scheme Name'])
 
-    # Aggregation Logic
+    # 3. Calculation Logic
     def calculate_summary(group):
-        net_units = group.loc[group['Type'].str.lower() == 'buy', 'Units'].sum() - \
-                    group.loc[group['Type'].str.lower() == 'sell', 'Units'].sum()
-        total_invested = group.loc[group['Type'].str.lower() == 'buy', 'Amount'].sum()
+        buy_units = group.loc[group['Type'] == 'buy', 'Units'].sum()
+        sell_units = group.loc[group['Type'] == 'sell', 'Units'].sum()
+        net_units = buy_units - sell_units
+        
+        total_invested = group.loc[group['Type'] == 'buy', 'Amount'].sum()
+        # Use the very last NAV mentioned for this fund
         latest_nav = group['Current_NAV'].iloc[-1]
+        
         return pd.Series({
             'Net Units': net_units,
             'Invested Amount': total_invested,
             'Current Value': net_units * latest_nav
         })
 
-    summary = df.groupby('Scheme Name').apply(calculate_summary).reset_index()
+    summary = df.groupby('Scheme Name', group_keys=False).apply(calculate_summary).reset_index()
 
     portfolio_dates = []
     portfolio_flows = []
@@ -47,14 +57,17 @@ if uploaded_file:
 
     for scheme in summary['Scheme Name']:
         scheme_tx = df[df['Scheme Name'] == scheme].copy()
-        scheme_tx['Flow'] = np.where(scheme_tx['Type'].str.lower() == 'buy', -scheme_tx['Amount'], scheme_tx['Amount'])
+        # Buys are negative (outflow), Sells are positive (inflow)
+        scheme_tx['Flow'] = np.where(scheme_tx['Type'] == 'buy', -scheme_tx['Amount'], scheme_tx['Amount'])
         
-        dates = scheme_tx['Date'].tolist()
+        dates = scheme_tx['Date'].dropna().tolist()
         amounts = scheme_tx['Flow'].tolist()
         
+        # Add to global portfolio tracking
         portfolio_dates.extend(dates)
         portfolio_flows.extend(amounts)
         
+        # Add final valuation as a positive flow
         current_val = summary.loc[summary['Scheme Name'] == scheme, 'Current Value'].iloc[0]
         if current_val > 0:
             dates.append(pd.Timestamp.now())
@@ -62,13 +75,13 @@ if uploaded_file:
         
         try:
             rate = xirr(dates, amounts) * 100
-            xirr_results.append(round(rate, 2))
+            xirr_results.append(round(rate, 2) if rate else 0.0)
         except:
             xirr_results.append(0.0)
 
     summary['XIRR (%)'] = xirr_results
 
-    # Aggregate Calculation
+    # 4. Aggregate Portfolio Metrics
     total_portfolio_value = summary['Current Value'].sum()
     portfolio_dates.append(pd.Timestamp.now())
     portfolio_flows.append(total_portfolio_value)
@@ -78,13 +91,12 @@ if uploaded_file:
     except:
         total_xirr = 0.0
 
-    # Display Metrics
+    # 5. Dashboard UI
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Current Value", f"₹{total_portfolio_value:,.2f}")
-    col2.metric("Portfolio XIRR", f"{total_xirr}%")
-    col3.metric("Total Funds", len(summary))
+    col1.metric("Total Portfolio Value", f"₹{total_portfolio_value:,.2f}")
+    col2.metric("Aggregate Portfolio XIRR", f"{total_xirr}%")
+    col3.metric("Number of Holdings", len(summary))
 
-    # Visualization
     def get_color(val):
         if val < 10: return 'Amber (<10%)'
         elif 10 <= val <= 15: return 'Green (10-15%)'
@@ -94,8 +106,11 @@ if uploaded_file:
     color_map = {'Amber (<10%)': '#FFBF00', 'Green (10-15%)': '#228B22', 'Blue (>15%)': '#0000FF'}
 
     fig = px.bar(summary, x='Scheme Name', y='XIRR (%)', color='Performance Category',
-                 color_discrete_map=color_map, text_auto='.2f', title="Performance by Fund")
+                 color_discrete_map=color_map, text_auto='.2f', title="Performance Comparison")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Detailed Breakdown")
+    st.subheader("Fund-wise Details")
     st.dataframe(summary)
+
+else:
+    st.info("Awaiting CSV upload. Make sure your 'Order' column contains 'buy' or 'sell'.")
